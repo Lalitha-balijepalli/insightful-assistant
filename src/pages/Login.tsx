@@ -1,19 +1,87 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Bot, Mail, Lock, ArrowRight, Github, Chrome } from "lucide-react";
+import { Bot, Mail, Lock, ArrowRight, User } from "lucide-react";
+import { useAuth } from "@/hooks/useAuth";
+import { toast } from "sonner";
+import { z } from "zod";
+
+const authSchema = z.object({
+  email: z.string().email("Please enter a valid email address"),
+  password: z.string().min(6, "Password must be at least 6 characters"),
+  fullName: z.string().optional(),
+});
 
 const Login = () => {
   const [isLogin, setIsLogin] = useState(true);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [fullName, setFullName] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [errors, setErrors] = useState<{ email?: string; password?: string }>({});
+  
+  const { signIn, signUp, user } = useAuth();
+  const navigate = useNavigate();
 
-  const handleSubmit = (e: React.FormEvent) => {
+  // Redirect if already logged in
+  if (user) {
+    navigate("/chat");
+    return null;
+  }
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    // TODO: Implement authentication
-    console.log("Auth:", { email, password, isLogin });
+    setErrors({});
+
+    // Validate input
+    const validation = authSchema.safeParse({ email, password, fullName });
+    if (!validation.success) {
+      const fieldErrors: { email?: string; password?: string } = {};
+      validation.error.errors.forEach((err) => {
+        if (err.path[0] === "email") fieldErrors.email = err.message;
+        if (err.path[0] === "password") fieldErrors.password = err.message;
+      });
+      setErrors(fieldErrors);
+      return;
+    }
+
+    setIsSubmitting(true);
+
+    try {
+      if (isLogin) {
+        const { error } = await signIn(email, password);
+        if (error) {
+          if (error.message.includes("Invalid login credentials")) {
+            toast.error("Invalid email or password");
+          } else {
+            toast.error(error.message);
+          }
+          return;
+        }
+        toast.success("Welcome back!");
+        navigate("/chat");
+      } else {
+        const { error } = await signUp(email, password, fullName);
+        if (error) {
+          if (error.message.includes("already registered")) {
+            toast.error("An account with this email already exists");
+          } else {
+            toast.error(error.message);
+          }
+          return;
+        }
+        // Auto-login after signup (since auto-confirm is enabled)
+        const { error: signInError } = await signIn(email, password);
+        if (!signInError) {
+          toast.success("Account created! Welcome to NexusAI!");
+          navigate("/chat");
+        }
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -41,31 +109,25 @@ const Login = () => {
             </p>
           </div>
 
-          {/* Social Auth */}
-          <div className="grid grid-cols-2 gap-3 mb-6">
-            <Button variant="outline" className="gap-2">
-              <Github className="w-4 h-4" />
-              GitHub
-            </Button>
-            <Button variant="outline" className="gap-2">
-              <Chrome className="w-4 h-4" />
-              Google
-            </Button>
-          </div>
-
-          <div className="relative mb-6">
-            <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-border" />
-            </div>
-            <div className="relative flex justify-center text-xs uppercase">
-              <span className="bg-background px-2 text-muted-foreground">
-                Or continue with
-              </span>
-            </div>
-          </div>
-
           {/* Form */}
           <form onSubmit={handleSubmit} className="space-y-4">
+            {!isLogin && (
+              <div className="space-y-2">
+                <Label htmlFor="fullName">Full Name</Label>
+                <div className="relative">
+                  <User className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                  <Input
+                    id="fullName"
+                    type="text"
+                    placeholder="John Doe"
+                    value={fullName}
+                    onChange={(e) => setFullName(e.target.value)}
+                    className="pl-10"
+                  />
+                </div>
+              </div>
+            )}
+
             <div className="space-y-2">
               <Label htmlFor="email">Email</Label>
               <div className="relative">
@@ -76,10 +138,13 @@ const Login = () => {
                   placeholder="you@company.com"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  className="pl-10"
+                  className={`pl-10 ${errors.email ? "border-destructive" : ""}`}
                   required
                 />
               </div>
+              {errors.email && (
+                <p className="text-sm text-destructive">{errors.email}</p>
+              )}
             </div>
 
             <div className="space-y-2">
@@ -92,26 +157,29 @@ const Login = () => {
                   placeholder="••••••••"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="pl-10"
+                  className={`pl-10 ${errors.password ? "border-destructive" : ""}`}
                   required
                 />
               </div>
+              {errors.password && (
+                <p className="text-sm text-destructive">{errors.password}</p>
+              )}
             </div>
 
-            {isLogin && (
-              <div className="flex items-center justify-end">
-                <Link
-                  to="/forgot-password"
-                  className="text-sm text-primary hover:underline"
-                >
-                  Forgot password?
-                </Link>
-              </div>
-            )}
-
-            <Button type="submit" variant="hero" className="w-full gap-2">
-              {isLogin ? "Sign In" : "Create Account"}
-              <ArrowRight className="w-4 h-4" />
+            <Button
+              type="submit"
+              variant="hero"
+              className="w-full gap-2"
+              disabled={isSubmitting}
+            >
+              {isSubmitting ? (
+                "Please wait..."
+              ) : (
+                <>
+                  {isLogin ? "Sign In" : "Create Account"}
+                  <ArrowRight className="w-4 h-4" />
+                </>
+              )}
             </Button>
           </form>
 
@@ -120,7 +188,10 @@ const Login = () => {
             {isLogin ? "Don't have an account?" : "Already have an account?"}{" "}
             <button
               type="button"
-              onClick={() => setIsLogin(!isLogin)}
+              onClick={() => {
+                setIsLogin(!isLogin);
+                setErrors({});
+              }}
               className="text-primary hover:underline font-medium"
             >
               {isLogin ? "Sign up" : "Sign in"}
