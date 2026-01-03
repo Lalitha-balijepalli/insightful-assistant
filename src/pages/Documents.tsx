@@ -1,8 +1,7 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Bot,
   Upload,
@@ -20,52 +19,72 @@ import {
   CheckCircle2,
   Clock,
   AlertCircle,
+  RefreshCw,
+  Loader2,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
-
-interface Document {
-  id: string;
-  name: string;
-  type: "pdf" | "csv" | "xlsx" | "txt";
-  size: string;
-  uploadedAt: Date;
-  status: "processed" | "processing" | "error";
-  chunks: number;
-}
-
-const mockDocuments: Document[] = [
-  { id: "1", name: "Q4 Sales Report 2024.pdf", type: "pdf", size: "2.4 MB", uploadedAt: new Date(), status: "processed", chunks: 156 },
-  { id: "2", name: "Customer Database.csv", type: "csv", size: "1.8 MB", uploadedAt: new Date(Date.now() - 86400000), status: "processed", chunks: 342 },
-  { id: "3", name: "Product Catalog.xlsx", type: "xlsx", size: "4.2 MB", uploadedAt: new Date(Date.now() - 172800000), status: "processing", chunks: 0 },
-  { id: "4", name: "Company Policies.pdf", type: "pdf", size: "890 KB", uploadedAt: new Date(Date.now() - 259200000), status: "processed", chunks: 89 },
-  { id: "5", name: "Meeting Notes.txt", type: "txt", size: "45 KB", uploadedAt: new Date(Date.now() - 345600000), status: "processed", chunks: 12 },
-  { id: "6", name: "Financial Analysis.pdf", type: "pdf", size: "3.1 MB", uploadedAt: new Date(Date.now() - 432000000), status: "error", chunks: 0 },
-];
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { useDocuments, type Document } from "@/hooks/useDocuments";
+import { useAuth } from "@/hooks/useAuth";
+import { Navigate } from "react-router-dom";
+import { Progress } from "@/components/ui/progress";
+import { formatDistanceToNow } from "date-fns";
 
 const getFileIcon = (type: string) => {
-  switch (type) {
-    case "pdf": return FileText;
-    case "csv": return FileSpreadsheet;
-    case "xlsx": return FileSpreadsheet;
-    default: return File;
-  }
+  if (type.includes("pdf")) return FileText;
+  if (type.includes("csv") || type.includes("spreadsheet") || type.includes("excel")) return FileSpreadsheet;
+  return File;
 };
 
 const getStatusIcon = (status: string) => {
   switch (status) {
-    case "processed": return <CheckCircle2 className="w-4 h-4 text-green-500" />;
-    case "processing": return <Clock className="w-4 h-4 text-yellow-500 animate-pulse" />;
-    case "error": return <AlertCircle className="w-4 h-4 text-destructive" />;
-    default: return null;
+    case "processed":
+      return <CheckCircle2 className="w-4 h-4 text-green-500" />;
+    case "processing":
+      return <Clock className="w-4 h-4 text-yellow-500 animate-pulse" />;
+    case "error":
+      return <AlertCircle className="w-4 h-4 text-destructive" />;
+    default:
+      return null;
   }
 };
 
+const formatFileSize = (bytes: number) => {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+};
+
 const Documents = () => {
+  const { user, loading: authLoading } = useAuth();
+  const {
+    documents,
+    isLoading,
+    uploadFiles,
+    uploadProgress,
+    isUploading,
+    deleteDocument,
+    isDeleting,
+    reprocessDocument,
+    isReprocessing,
+  } = useDocuments();
+
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
   const [searchQuery, setSearchQuery] = useState("");
   const [isDragging, setIsDragging] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const filteredDocs = mockDocuments.filter(doc => 
+  // Redirect if not authenticated
+  if (!authLoading && !user) {
+    return <Navigate to="/login" replace />;
+  }
+
+  const filteredDocs = documents.filter((doc) =>
     doc.name.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
@@ -78,11 +97,31 @@ const Documents = () => {
     setIsDragging(false);
   };
 
-  const handleDrop = (e: React.DragEvent) => {
+  const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
-    // TODO: Handle file upload
-    console.log("Files dropped:", e.dataTransfer.files);
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length > 0) {
+      await uploadFiles(files);
+    }
+  };
+
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length > 0) {
+      await uploadFiles(files);
+    }
+    // Reset input
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  };
+
+  const stats = {
+    total: documents.length,
+    processed: documents.filter((d) => d.status === "processed").length,
+    processing: documents.filter((d) => d.status === "processing").length,
+    totalChunks: documents.reduce((acc, d) => acc + (d.chunks_count || 0), 0),
   };
 
   return (
@@ -104,10 +143,27 @@ const Documents = () => {
                 <span className="font-semibold">Knowledge Base</span>
               </div>
             </div>
-            <Button variant="hero" className="gap-2">
-              <Upload className="w-4 h-4" />
+            <Button
+              variant="hero"
+              className="gap-2"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={isUploading}
+            >
+              {isUploading ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Upload className="w-4 h-4" />
+              )}
               Upload Files
             </Button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              className="hidden"
+              multiple
+              accept=".pdf,.txt,.csv,.xlsx,.xls"
+              onChange={handleFileSelect}
+            />
           </div>
         </div>
       </header>
@@ -128,13 +184,29 @@ const Documents = () => {
             <Upload className="w-8 h-8 text-primary" />
           </div>
           <h3 className="text-lg font-semibold mb-2">
-            Drag and drop files here
+            {isDragging ? "Drop files here" : "Drag and drop files here"}
           </h3>
           <p className="text-muted-foreground text-sm mb-4">
             Supports PDF, CSV, Excel, and TXT files up to 50MB
           </p>
-          <Button variant="outline">Browse Files</Button>
+          <Button variant="outline" onClick={() => fileInputRef.current?.click()}>
+            Browse Files
+          </Button>
         </div>
+
+        {/* Upload Progress */}
+        {Object.keys(uploadProgress).length > 0 && (
+          <div className="mb-6 space-y-2">
+            {Object.entries(uploadProgress).map(([name, progress]) => (
+              <div key={name} className="flex items-center gap-3 p-3 rounded-lg bg-card border border-border">
+                <Loader2 className="w-4 h-4 animate-spin text-primary" />
+                <span className="flex-1 text-sm truncate">{name}</span>
+                <Progress value={progress} className="w-32" />
+                <span className="text-sm text-muted-foreground">{progress}%</span>
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* Toolbar */}
         <div className="flex items-center justify-between mb-6">
@@ -179,7 +251,7 @@ const Documents = () => {
                 <FolderOpen className="w-5 h-5 text-primary" />
               </div>
               <div>
-                <p className="text-2xl font-bold">{mockDocuments.length}</p>
+                <p className="text-2xl font-bold">{stats.total}</p>
                 <p className="text-sm text-muted-foreground">Total Documents</p>
               </div>
             </CardContent>
@@ -190,7 +262,7 @@ const Documents = () => {
                 <CheckCircle2 className="w-5 h-5 text-green-500" />
               </div>
               <div>
-                <p className="text-2xl font-bold">{mockDocuments.filter(d => d.status === "processed").length}</p>
+                <p className="text-2xl font-bold">{stats.processed}</p>
                 <p className="text-sm text-muted-foreground">Processed</p>
               </div>
             </CardContent>
@@ -201,7 +273,7 @@ const Documents = () => {
                 <Clock className="w-5 h-5 text-yellow-500" />
               </div>
               <div>
-                <p className="text-2xl font-bold">{mockDocuments.filter(d => d.status === "processing").length}</p>
+                <p className="text-2xl font-bold">{stats.processing}</p>
                 <p className="text-sm text-muted-foreground">Processing</p>
               </div>
             </CardContent>
@@ -212,41 +284,104 @@ const Documents = () => {
                 <FileText className="w-5 h-5 text-blue-500" />
               </div>
               <div>
-                <p className="text-2xl font-bold">{mockDocuments.reduce((acc, d) => acc + d.chunks, 0)}</p>
+                <p className="text-2xl font-bold">{stats.totalChunks}</p>
                 <p className="text-sm text-muted-foreground">Total Chunks</p>
               </div>
             </CardContent>
           </Card>
         </div>
 
+        {/* Loading State */}
+        {isLoading && (
+          <div className="flex items-center justify-center py-12">
+            <Loader2 className="w-8 h-8 animate-spin text-primary" />
+          </div>
+        )}
+
+        {/* Empty State */}
+        {!isLoading && documents.length === 0 && (
+          <div className="text-center py-12">
+            <FolderOpen className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
+            <h3 className="text-lg font-medium mb-2">No documents yet</h3>
+            <p className="text-muted-foreground mb-4">
+              Upload documents to build your knowledge base for AI-powered chat.
+            </p>
+            <Button variant="outline" onClick={() => fileInputRef.current?.click()}>
+              <Upload className="w-4 h-4 mr-2" />
+              Upload Your First Document
+            </Button>
+          </div>
+        )}
+
         {/* Documents Grid/List */}
-        {viewMode === "grid" ? (
+        {!isLoading && filteredDocs.length > 0 && viewMode === "grid" && (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
             {filteredDocs.map((doc) => {
-              const FileIcon = getFileIcon(doc.type);
+              const FileIcon = getFileIcon(doc.file_type);
               return (
-                <Card key={doc.id} className="group hover:border-primary/50 transition-colors cursor-pointer">
+                <Card
+                  key={doc.id}
+                  className="group hover:border-primary/50 transition-colors"
+                >
                   <CardContent className="p-4">
                     <div className="flex items-start justify-between mb-4">
-                      <div className={`w-12 h-12 rounded-lg flex items-center justify-center ${
-                        doc.type === "pdf" ? "bg-red-500/10 text-red-500" :
-                        doc.type === "csv" || doc.type === "xlsx" ? "bg-green-500/10 text-green-500" :
-                        "bg-muted text-muted-foreground"
-                      }`}>
+                      <div
+                        className={`w-12 h-12 rounded-lg flex items-center justify-center ${
+                          doc.file_type.includes("pdf")
+                            ? "bg-red-500/10 text-red-500"
+                            : doc.file_type.includes("csv") || doc.file_type.includes("spreadsheet")
+                            ? "bg-green-500/10 text-green-500"
+                            : "bg-muted text-muted-foreground"
+                        }`}
+                      >
                         <FileIcon className="w-6 h-6" />
                       </div>
-                      <Button variant="ghost" size="icon" className="opacity-0 group-hover:opacity-100 transition-opacity">
-                        <MoreVertical className="w-4 h-4" />
-                      </Button>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="opacity-0 group-hover:opacity-100 transition-opacity"
+                          >
+                            <MoreVertical className="w-4 h-4" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          {doc.status === "error" && (
+                            <DropdownMenuItem
+                              onClick={() => reprocessDocument(doc.id)}
+                              disabled={isReprocessing}
+                            >
+                              <RefreshCw className="w-4 h-4 mr-2" />
+                              Retry Processing
+                            </DropdownMenuItem>
+                          )}
+                          <DropdownMenuItem
+                            onClick={() => deleteDocument(doc.id)}
+                            disabled={isDeleting}
+                            className="text-destructive"
+                          >
+                            <Trash2 className="w-4 h-4 mr-2" />
+                            Delete
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
                     </div>
                     <h3 className="font-medium truncate mb-1">{doc.name}</h3>
                     <div className="flex items-center justify-between">
-                      <span className="text-sm text-muted-foreground">{doc.size}</span>
+                      <span className="text-sm text-muted-foreground">
+                        {formatFileSize(doc.file_size)}
+                      </span>
                       {getStatusIcon(doc.status)}
                     </div>
                     {doc.status === "processed" && (
                       <p className="text-xs text-muted-foreground mt-2">
-                        {doc.chunks} chunks indexed
+                        {doc.chunks_count || 0} chunks indexed
+                      </p>
+                    )}
+                    {doc.status === "error" && (
+                      <p className="text-xs text-destructive mt-2">
+                        Processing failed - click to retry
                       </p>
                     )}
                   </CardContent>
@@ -254,35 +389,71 @@ const Documents = () => {
               );
             })}
           </div>
-        ) : (
+        )}
+
+        {!isLoading && filteredDocs.length > 0 && viewMode === "list" && (
           <Card>
             <CardContent className="p-0">
               <div className="divide-y divide-border">
                 {filteredDocs.map((doc) => {
-                  const FileIcon = getFileIcon(doc.type);
+                  const FileIcon = getFileIcon(doc.file_type);
                   return (
-                    <div key={doc.id} className="flex items-center gap-4 p-4 hover:bg-muted/30 transition-colors cursor-pointer group">
-                      <div className={`w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 ${
-                        doc.type === "pdf" ? "bg-red-500/10 text-red-500" :
-                        doc.type === "csv" || doc.type === "xlsx" ? "bg-green-500/10 text-green-500" :
-                        "bg-muted text-muted-foreground"
-                      }`}>
+                    <div
+                      key={doc.id}
+                      className="flex items-center gap-4 p-4 hover:bg-muted/30 transition-colors group"
+                    >
+                      <div
+                        className={`w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 ${
+                          doc.file_type.includes("pdf")
+                            ? "bg-red-500/10 text-red-500"
+                            : doc.file_type.includes("csv") || doc.file_type.includes("spreadsheet")
+                            ? "bg-green-500/10 text-green-500"
+                            : "bg-muted text-muted-foreground"
+                        }`}
+                      >
                         <FileIcon className="w-5 h-5" />
                       </div>
                       <div className="flex-1 min-w-0">
                         <h3 className="font-medium truncate">{doc.name}</h3>
                         <p className="text-sm text-muted-foreground">
-                          {doc.size} • {doc.chunks} chunks
+                          {formatFileSize(doc.file_size)} • {doc.chunks_count || 0} chunks
                         </p>
                       </div>
                       <div className="flex items-center gap-4">
                         {getStatusIcon(doc.status)}
                         <span className="text-sm text-muted-foreground">
-                          {doc.uploadedAt.toLocaleDateString()}
+                          {formatDistanceToNow(new Date(doc.created_at), { addSuffix: true })}
                         </span>
-                        <Button variant="ghost" size="icon" className="opacity-0 group-hover:opacity-100 transition-opacity">
-                          <Trash2 className="w-4 h-4" />
-                        </Button>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="opacity-0 group-hover:opacity-100 transition-opacity"
+                            >
+                              <MoreVertical className="w-4 h-4" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            {doc.status === "error" && (
+                              <DropdownMenuItem
+                                onClick={() => reprocessDocument(doc.id)}
+                                disabled={isReprocessing}
+                              >
+                                <RefreshCw className="w-4 h-4 mr-2" />
+                                Retry Processing
+                              </DropdownMenuItem>
+                            )}
+                            <DropdownMenuItem
+                              onClick={() => deleteDocument(doc.id)}
+                              disabled={isDeleting}
+                              className="text-destructive"
+                            >
+                              <Trash2 className="w-4 h-4 mr-2" />
+                              Delete
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
                       </div>
                     </div>
                   );
