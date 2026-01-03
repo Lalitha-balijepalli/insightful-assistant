@@ -203,14 +203,14 @@ const Chat = () => {
 
   if (loading) {
     return (
-      <div className="flex h-screen items-center justify-center bg-background dark">
+      <div className="flex h-screen items-center justify-center bg-background">
         <div className="animate-pulse text-muted-foreground">Loading...</div>
       </div>
     );
   }
 
   return (
-    <div className="flex h-screen bg-background dark">
+    <div className="flex h-screen bg-background text-foreground">
       {/* Sidebar */}
       <aside
         className={`${

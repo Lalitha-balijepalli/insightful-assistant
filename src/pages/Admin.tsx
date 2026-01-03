@@ -53,7 +53,7 @@ const Admin = () => {
   const [activeMenu, setActiveMenu] = useState("Dashboard");
 
   return (
-    <div className="flex h-screen bg-background dark">
+    <div className="flex h-screen bg-background text-foreground">
       {/* Sidebar */}
       <aside className="w-64 bg-sidebar border-r border-sidebar-border flex flex-col">
         {/* Logo */}
