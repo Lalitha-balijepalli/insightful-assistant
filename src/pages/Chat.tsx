@@ -18,8 +18,12 @@ import {
   ThumbsDown,
   Copy,
   RefreshCw,
+  LogOut,
 } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
+import { useAuth } from "@/hooks/useAuth";
+import { supabase } from "@/integrations/supabase/client";
+import { toast } from "sonner";
 
 interface Message {
   id: string;
@@ -36,28 +40,9 @@ interface Conversation {
   timestamp: Date;
 }
 
-const mockConversations: Conversation[] = [
-  {
-    id: "1",
-    title: "Weekly Sales Report",
-    lastMessage: "Report generated and sent...",
-    timestamp: new Date(),
-  },
-  {
-    id: "2",
-    title: "Q4 Performance Analysis",
-    lastMessage: "Based on the data...",
-    timestamp: new Date(Date.now() - 86400000),
-  },
-  {
-    id: "3",
-    title: "Task Scheduling Setup",
-    lastMessage: "I've scheduled the meeting...",
-    timestamp: new Date(Date.now() - 172800000),
-  },
-];
-
 const Chat = () => {
+  const { user, loading, signOut } = useAuth();
+  const navigate = useNavigate();
   const [messages, setMessages] = useState<Message[]>([
     {
       id: "1",
@@ -70,7 +55,14 @@ const Chat = () => {
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!loading && !user) {
+      navigate("/login");
+    }
+  }, [user, loading, navigate]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -79,6 +71,106 @@ const Chat = () => {
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  const streamChat = async (userMessage: string) => {
+    setIsLoading(true);
+    
+    const allMessages = [
+      ...messages.filter(m => m.id !== "1").map(m => ({
+        role: m.role as "user" | "assistant",
+        content: m.content,
+      })),
+      { role: "user" as const, content: userMessage },
+    ];
+
+    try {
+      const response = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/chat`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+          },
+          body: JSON.stringify({ messages: allMessages }),
+        }
+      );
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || `Request failed: ${response.status}`);
+      }
+
+      if (!response.body) {
+        throw new Error("No response body");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let assistantContent = "";
+      const assistantId = Date.now().toString();
+
+      // Add empty assistant message
+      setMessages(prev => [
+        ...prev,
+        {
+          id: assistantId,
+          role: "assistant",
+          content: "",
+          timestamp: new Date(),
+        },
+      ]);
+
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        // Process complete lines
+        let newlineIndex: number;
+        while ((newlineIndex = buffer.indexOf("\n")) !== -1) {
+          let line = buffer.slice(0, newlineIndex);
+          buffer = buffer.slice(newlineIndex + 1);
+
+          if (line.endsWith("\r")) line = line.slice(0, -1);
+          if (line.startsWith(":") || line.trim() === "") continue;
+          if (!line.startsWith("data: ")) continue;
+
+          const jsonStr = line.slice(6).trim();
+          if (jsonStr === "[DONE]") break;
+
+          try {
+            const parsed = JSON.parse(jsonStr);
+            const content = parsed.choices?.[0]?.delta?.content;
+            if (content) {
+              assistantContent += content;
+              setMessages(prev =>
+                prev.map(m =>
+                  m.id === assistantId
+                    ? { ...m, content: assistantContent }
+                    : m
+                )
+              );
+            }
+          } catch {
+            // Incomplete JSON, put back and wait
+            buffer = line + "\n" + buffer;
+            break;
+          }
+        }
+      }
+    } catch (error) {
+      console.error("Chat error:", error);
+      toast.error(error instanceof Error ? error.message : "Failed to send message");
+      // Remove the loading message if there was an error
+      setMessages(prev => prev.filter(m => m.content !== ""));
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   const handleSend = async () => {
     if (!inputValue.trim() || isLoading) return;
@@ -90,23 +182,11 @@ const Chat = () => {
       timestamp: new Date(),
     };
 
-    setMessages((prev) => [...prev, userMessage]);
+    setMessages(prev => [...prev, userMessage]);
+    const messageContent = inputValue;
     setInputValue("");
-    setIsLoading(true);
-
-    // Simulate AI response
-    setTimeout(() => {
-      const assistantMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content:
-          "I understand you're asking about that topic. Let me search through your knowledge base to find the most relevant information.\n\nBased on the documents I've analyzed, here's what I found:\n\n**Key Findings:**\n1. The data indicates positive trends in the specified area\n2. Historical patterns suggest continued growth\n3. Action items have been identified for follow-up\n\nWould you like me to generate a detailed report or take any automated actions based on these findings?",
-        timestamp: new Date(),
-        sources: ["Sales Report Q4 2024.pdf", "Performance Metrics.xlsx"],
-      };
-      setMessages((prev) => [...prev, assistantMessage]);
-      setIsLoading(false);
-    }, 1500);
+    
+    await streamChat(messageContent);
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -115,6 +195,19 @@ const Chat = () => {
       handleSend();
     }
   };
+
+  const handleSignOut = async () => {
+    await signOut();
+    navigate("/");
+  };
+
+  if (loading) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-background dark">
+        <div className="animate-pulse text-muted-foreground">Loading...</div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen bg-background dark">
@@ -132,7 +225,14 @@ const Chat = () => {
             </div>
             <span className="font-semibold">NexusAI</span>
           </Link>
-          <Button variant="outline" className="w-full justify-start gap-2">
+          <Button variant="outline" className="w-full justify-start gap-2" onClick={() => {
+            setMessages([{
+              id: "1",
+              role: "assistant",
+              content: "Hello! I'm NexusAI, your intelligent assistant. How can I help you today?",
+              timestamp: new Date(),
+            }]);
+          }}>
             <Plus className="w-4 h-4" />
             New Chat
           </Button>
@@ -152,20 +252,11 @@ const Chat = () => {
         {/* Conversation List */}
         <ScrollArea className="flex-1 px-2">
           <div className="space-y-1">
-            {mockConversations.map((conv) => (
-              <button
-                key={conv.id}
-                className="w-full p-3 rounded-lg text-left hover:bg-sidebar-accent transition-colors group"
-              >
-                <div className="flex items-center gap-2">
-                  <MessageSquare className="w-4 h-4 text-muted-foreground flex-shrink-0" />
-                  <span className="font-medium truncate text-sm">{conv.title}</span>
-                </div>
-                <p className="text-xs text-muted-foreground mt-1 truncate">
-                  {conv.lastMessage}
-                </p>
-              </button>
-            ))}
+            {conversations.length === 0 && (
+              <p className="text-sm text-muted-foreground text-center py-4">
+                No conversations yet
+              </p>
+            )}
           </div>
         </ScrollArea>
 
@@ -182,6 +273,10 @@ const Chat = () => {
               <Settings className="w-4 h-4" />
               Settings
             </Link>
+          </Button>
+          <Button variant="ghost" className="w-full justify-start gap-2 text-destructive" onClick={handleSignOut}>
+            <LogOut className="w-4 h-4" />
+            Sign Out
           </Button>
         </div>
       </aside>
@@ -203,15 +298,20 @@ const Chat = () => {
               />
             </Button>
             <div>
-              <h1 className="font-semibold">New Conversation</h1>
+              <h1 className="font-semibold">Chat with NexusAI</h1>
               <p className="text-xs text-muted-foreground">
                 RAG-powered • Task automation enabled
               </p>
             </div>
           </div>
-          <Button variant="ghost" size="icon">
-            <MoreHorizontal className="w-5 h-5" />
-          </Button>
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-muted-foreground">
+              {user?.email}
+            </span>
+            <Button variant="ghost" size="icon">
+              <MoreHorizontal className="w-5 h-5" />
+            </Button>
+          </div>
         </header>
 
         {/* Messages */}
@@ -234,7 +334,9 @@ const Chat = () => {
                   {message.role === "assistant" ? (
                     <Sparkles className="w-4 h-4 text-primary-foreground" />
                   ) : (
-                    <span className="text-sm font-medium">U</span>
+                    <span className="text-sm font-medium">
+                      {user?.email?.charAt(0).toUpperCase() || "U"}
+                    </span>
                   )}
                 </div>
                 <div
@@ -250,7 +352,9 @@ const Chat = () => {
                     }`}
                   >
                     <div className="text-sm whitespace-pre-wrap text-left">
-                      {message.content}
+                      {message.content || (
+                        <span className="text-muted-foreground italic">Thinking...</span>
+                      )}
                     </div>
                     {message.sources && message.sources.length > 0 && (
                       <div className="mt-3 pt-3 border-t border-border/50">
@@ -270,9 +374,12 @@ const Chat = () => {
                       </div>
                     )}
                   </div>
-                  {message.role === "assistant" && (
+                  {message.role === "assistant" && message.content && (
                     <div className="flex items-center gap-2 mt-2">
-                      <Button variant="ghost" size="sm" className="h-7 px-2">
+                      <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => {
+                        navigator.clipboard.writeText(message.content);
+                        toast.success("Copied to clipboard");
+                      }}>
                         <Copy className="w-3 h-3" />
                       </Button>
                       <Button variant="ghost" size="sm" className="h-7 px-2">
@@ -289,7 +396,7 @@ const Chat = () => {
                 </div>
               </div>
             ))}
-            {isLoading && (
+            {isLoading && messages[messages.length - 1]?.content === "" && (
               <div className="flex gap-4 animate-fade-in">
                 <div className="w-8 h-8 rounded-full bg-gradient-primary flex items-center justify-center">
                   <Sparkles className="w-4 h-4 text-primary-foreground animate-pulse" />
@@ -320,8 +427,10 @@ const Chat = () => {
           <div className="max-w-3xl mx-auto">
             <div className="relative">
               <div className="flex items-center gap-2 p-2 rounded-xl bg-card border border-border focus-within:border-primary/50 transition-colors">
-                <Button variant="ghost" size="icon" className="flex-shrink-0">
-                  <Upload className="w-5 h-5" />
+                <Button variant="ghost" size="icon" className="flex-shrink-0" asChild>
+                  <Link to="/documents">
+                    <Upload className="w-5 h-5" />
+                  </Link>
                 </Button>
                 <Input
                   value={inputValue}
@@ -329,6 +438,7 @@ const Chat = () => {
                   onKeyDown={handleKeyPress}
                   placeholder="Ask anything or request a task..."
                   className="flex-1 border-0 focus-visible:ring-0 bg-transparent"
+                  disabled={isLoading}
                 />
                 <Button
                   variant="hero"
