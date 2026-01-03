@@ -85,9 +85,9 @@ const Login = () => {
   };
 
   return (
-    <div className="min-h-screen flex dark">
+    <div className="min-h-screen flex bg-background text-foreground dark">
       {/* Left Panel - Form */}
-      <div className="flex-1 flex items-center justify-center p-8 bg-background">
+      <div className="flex-1 flex items-center justify-center p-8">
         <div className="w-full max-w-md">
           {/* Logo */}
           <Link to="/" className="flex items-center gap-2 mb-8">
