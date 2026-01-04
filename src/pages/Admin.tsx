@@ -144,11 +144,17 @@ const Admin = () => {
         <div className="p-4 border-t border-sidebar-border">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-full bg-gradient-primary flex items-center justify-center">
-              <span className="text-sm font-medium text-primary-foreground">A</span>
+              <span className="text-sm font-medium text-primary-foreground">
+                {user?.user_metadata?.full_name?.charAt(0)?.toUpperCase() || user?.email?.charAt(0)?.toUpperCase() || "A"}
+              </span>
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium truncate">Admin User</p>
-              <p className="text-xs text-muted-foreground truncate">admin@company.com</p>
+              <p className="text-sm font-medium truncate">
+                {user?.user_metadata?.full_name || "Admin User"}
+              </p>
+              <p className="text-xs text-muted-foreground truncate">
+                {user?.email || "admin@company.com"}
+              </p>
             </div>
             <ChevronDown className="w-4 h-4 text-muted-foreground" />
           </div>
