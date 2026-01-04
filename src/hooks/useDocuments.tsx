@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "./useAuth";
 import { toast } from "sonner";
@@ -38,7 +38,46 @@ export const useDocuments = () => {
       return data as Document[];
     },
     enabled: !!user,
+    // Refetch every 3 seconds while there are processing documents
+    refetchInterval: (query) => {
+      const docs = query.state.data as Document[] | undefined;
+      const hasProcessing = docs?.some((d) => d.status === "processing");
+      return hasProcessing ? 3000 : false;
+    },
   });
+
+  // Real-time subscription for document status updates
+  useEffect(() => {
+    if (!user) return;
+
+    const channel = supabase
+      .channel("document-status-changes")
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "documents",
+          filter: `user_id=eq.${user.id}`,
+        },
+        (payload) => {
+          const updated = payload.new as Document;
+          // Show toast when processing completes
+          if (updated.status === "processed") {
+            toast.success(`"${updated.name}" processed successfully`);
+          } else if (updated.status === "error") {
+            toast.error(`Failed to process "${updated.name}"`);
+          }
+          // Refresh documents list
+          queryClient.invalidateQueries({ queryKey: ["documents"] });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [user, queryClient]);
 
   // Upload document
   const uploadMutation = useMutation({
