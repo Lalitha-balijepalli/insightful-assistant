@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Link, Routes, Route, useLocation } from "react-router-dom";
+import { Link, Routes, Route, useLocation, Navigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -15,6 +15,7 @@ import {
   ChevronDown,
   Workflow,
   Shield,
+  Loader2,
 } from "lucide-react";
 
 import AdminDashboard from "./admin/AdminDashboard";
@@ -24,6 +25,8 @@ import AdminAutomations from "./admin/AdminAutomations";
 import AdminAnalytics from "./admin/AdminAnalytics";
 import AdminSecurity from "./admin/AdminSecurity";
 import AdminSettings from "./admin/AdminSettings";
+import { useAuth } from "@/hooks/useAuth";
+import { supabase } from "@/integrations/supabase/client";
 
 const menuItems = [
   { icon: LayoutDashboard, label: "Dashboard", href: "/admin" },
@@ -37,7 +40,44 @@ const menuItems = [
 
 const Admin = () => {
   const location = useLocation();
+  const { user, loading: authLoading } = useAuth();
   const [activeMenu, setActiveMenu] = useState("Dashboard");
+  const [hasAdminRole, setHasAdminRole] = useState<boolean | null>(null);
+  const [roleLoading, setRoleLoading] = useState(true);
+
+  // Check if user has admin role
+  useEffect(() => {
+    const checkAdminRole = async () => {
+      if (!user) {
+        setHasAdminRole(false);
+        setRoleLoading(false);
+        return;
+      }
+
+      try {
+        const { data, error } = await supabase
+          .from("user_roles")
+          .select("role")
+          .eq("user_id", user.id)
+          .eq("role", "admin")
+          .maybeSingle();
+
+        if (error) {
+          console.error("Error checking admin role:", error);
+          setHasAdminRole(false);
+        } else {
+          setHasAdminRole(!!data);
+        }
+      } catch (err) {
+        console.error("Error checking admin role:", err);
+        setHasAdminRole(false);
+      } finally {
+        setRoleLoading(false);
+      }
+    };
+
+    checkAdminRole();
+  }, [user]);
 
   // Update active menu based on current route
   useEffect(() => {
@@ -51,6 +91,20 @@ const Admin = () => {
       setActiveMenu(currentItem.label);
     }
   }, [location.pathname]);
+
+  // Show loading while checking auth and role
+  if (authLoading || roleLoading) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-background">
+        <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  // Redirect non-admin users to chat
+  if (!user || !hasAdminRole) {
+    return <Navigate to="/chat" replace />;
+  }
 
   return (
     <div className="flex h-screen bg-background text-foreground">
