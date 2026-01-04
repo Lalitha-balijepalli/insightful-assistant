@@ -20,56 +20,47 @@ function chunkText(text: string, chunkSize: number = 1000, overlap: number = 200
   return chunks;
 }
 
-// Maximum text size to prevent memory issues (500KB)
-const MAX_TEXT_SIZE = 500000;
+// Maximum text size to prevent memory issues (50KB for edge function limits)
+const MAX_TEXT_SIZE = 50000;
 
-// Extract text from different file types with size limits
+// Extract text from different file types with strict size limits
 function extractText(fileBuffer: ArrayBuffer, fileType: string): string {
-  const decoder = new TextDecoder("utf-8");
+  // Only process first 500KB of any file
+  const maxSize = 500 * 1024;
+  const limitedBuffer = fileBuffer.byteLength > maxSize 
+    ? fileBuffer.slice(0, maxSize) 
+    : fileBuffer;
+  
+  const decoder = new TextDecoder("utf-8", { fatal: false });
   
   // For TXT and CSV files, just decode the text
   if (fileType === "text/plain" || fileType === "text/csv" || fileType.includes("csv")) {
-    const text = decoder.decode(fileBuffer);
+    const text = decoder.decode(limitedBuffer);
     return text.slice(0, MAX_TEXT_SIZE);
   }
   
-  // For PDF files, extract basic text with memory-efficient approach
+  // For PDF files - simple extraction without regex (memory efficient)
   if (fileType === "application/pdf") {
-    // Only process first 2MB of PDF to avoid memory issues
-    const maxPdfSize = 2 * 1024 * 1024;
-    const limitedBuffer = fileBuffer.byteLength > maxPdfSize 
-      ? fileBuffer.slice(0, maxPdfSize) 
-      : fileBuffer;
+    const bytes = new Uint8Array(limitedBuffer);
+    let result = "";
     
-    const text = decoder.decode(limitedBuffer);
-    const textParts: string[] = [];
-    let totalLength = 0;
-    
-    // Extract text streams from PDF
-    const streamRegex = /stream[\r\n]+([\s\S]*?)[\r\n]+endstream/g;
-    let match;
-    while ((match = streamRegex.exec(text)) !== null && totalLength < MAX_TEXT_SIZE) {
-      const streamContent = match[1];
-      const readable = streamContent.replace(/[^\x20-\x7E\r\n]/g, " ").trim();
-      if (readable.length > 20 && readable.length < 50000) {
-        textParts.push(readable);
-        totalLength += readable.length;
+    // Extract printable ASCII only
+    for (let i = 0; i < bytes.length && result.length < MAX_TEXT_SIZE; i++) {
+      const byte = bytes[i];
+      if (byte >= 32 && byte <= 126) {
+        result += String.fromCharCode(byte);
+      } else if (byte === 10 || byte === 13) {
+        result += " ";
       }
     }
     
-    if (textParts.length === 0) {
-      // Fallback: extract any readable text
-      const readable = text.replace(/[^\x20-\x7E\r\n]/g, " ").replace(/\s+/g, " ").trim();
-      return readable.slice(0, MAX_TEXT_SIZE);
-    }
-    
-    const result = textParts.join("\n\n");
-    return result.slice(0, MAX_TEXT_SIZE);
+    // Clean up the result
+    return result.replace(/\s+/g, " ").trim().slice(0, MAX_TEXT_SIZE);
   }
   
   // For other types, try to decode as text
   try {
-    const text = decoder.decode(fileBuffer);
+    const text = decoder.decode(limitedBuffer);
     return text.slice(0, MAX_TEXT_SIZE);
   } catch {
     return "";
