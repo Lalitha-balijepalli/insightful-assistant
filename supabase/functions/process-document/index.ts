@@ -21,7 +21,7 @@ function chunkText(text: string, chunkSize: number = 1000, overlap: number = 200
 }
 
 // Extract text from different file types
-async function extractText(fileBuffer: ArrayBuffer, fileType: string): Promise<string> {
+function extractText(fileBuffer: ArrayBuffer, fileType: string): string {
   const decoder = new TextDecoder("utf-8");
   
   // For TXT and CSV files, just decode the text
@@ -29,15 +29,13 @@ async function extractText(fileBuffer: ArrayBuffer, fileType: string): Promise<s
     return decoder.decode(fileBuffer);
   }
   
-  // For PDF files, we'll extract basic text (simplified approach)
+  // For PDF files, extract basic text
   if (fileType === "application/pdf") {
     const text = decoder.decode(fileBuffer);
-    // Basic PDF text extraction - look for text between stream/endstream
     const textParts: string[] = [];
     const streamRegex = /stream[\r\n]+([\s\S]*?)[\r\n]+endstream/g;
     let match;
     while ((match = streamRegex.exec(text)) !== null) {
-      // Try to extract readable text
       const streamContent = match[1];
       const readable = streamContent.replace(/[^\x20-\x7E\r\n]/g, " ").trim();
       if (readable.length > 10) {
@@ -46,9 +44,8 @@ async function extractText(fileBuffer: ArrayBuffer, fileType: string): Promise<s
     }
     
     if (textParts.length === 0) {
-      // Fallback: extract any readable ASCII
       const readable = text.replace(/[^\x20-\x7E\r\n]/g, " ").replace(/\s+/g, " ").trim();
-      return readable.slice(0, 50000); // Limit size
+      return readable.slice(0, 50000);
     }
     
     return textParts.join("\n\n");
@@ -59,6 +56,117 @@ async function extractText(fileBuffer: ArrayBuffer, fileType: string): Promise<s
     return decoder.decode(fileBuffer);
   } catch {
     return "";
+  }
+}
+
+// Background processing function
+async function processDocumentInBackground(
+  supabaseUrl: string,
+  supabaseKey: string,
+  documentId: string,
+  userId: string
+) {
+  const supabase = createClient(supabaseUrl, supabaseKey);
+  
+  try {
+    // Get document info
+    const { data: document, error: docError } = await supabase
+      .from("documents")
+      .select("*")
+      .eq("id", documentId)
+      .eq("user_id", userId)
+      .single();
+
+    if (docError || !document) {
+      console.error("Document not found:", docError);
+      return;
+    }
+
+    console.log("Processing document:", document.name, document.file_type);
+
+    // Download file from storage
+    const { data: fileData, error: downloadError } = await supabase.storage
+      .from("documents")
+      .download(document.storage_path);
+
+    if (downloadError || !fileData) {
+      console.error("Download error:", downloadError);
+      await supabase
+        .from("documents")
+        .update({ status: "error" })
+        .eq("id", documentId);
+      return;
+    }
+
+    // Extract text from file
+    const fileBuffer = await fileData.arrayBuffer();
+    const text = extractText(fileBuffer, document.file_type);
+    
+    console.log("Extracted text length:", text.length);
+
+    if (text.length === 0) {
+      await supabase
+        .from("documents")
+        .update({ status: "error", chunks_count: 0 })
+        .eq("id", documentId);
+      return;
+    }
+
+    // Chunk the text
+    const chunks = chunkText(text, 1000, 200);
+    console.log("Created chunks:", chunks.length);
+
+    // Delete existing chunks for this document
+    await supabase
+      .from("document_chunks")
+      .delete()
+      .eq("document_id", documentId);
+
+    // Insert new chunks in a single batch (faster)
+    const chunkRecords = chunks.map((content, index) => ({
+      document_id: documentId,
+      chunk_index: index,
+      content: content.trim(),
+    }));
+
+    // Insert all at once if under 500 chunks, otherwise batch
+    if (chunkRecords.length <= 500) {
+      const { error: insertError } = await supabase
+        .from("document_chunks")
+        .insert(chunkRecords);
+      
+      if (insertError) {
+        console.error("Insert error:", insertError);
+      }
+    } else {
+      // Insert in larger batches of 500
+      for (let i = 0; i < chunkRecords.length; i += 500) {
+        const batch = chunkRecords.slice(i, i + 500);
+        const { error: insertError } = await supabase
+          .from("document_chunks")
+          .insert(batch);
+        
+        if (insertError) {
+          console.error("Insert error:", insertError);
+        }
+      }
+    }
+
+    // Update document status
+    await supabase
+      .from("documents")
+      .update({ status: "processed", chunks_count: chunks.length })
+      .eq("id", documentId);
+
+    console.log("Document processed successfully:", documentId);
+
+  } catch (error) {
+    console.error("Background processing error:", error);
+    const supabase = createClient(supabaseUrl, supabaseKey);
+    await supabase
+      .from("documents")
+      .update({ status: "error" })
+      .eq("id", documentId);
   }
 }
 
@@ -100,10 +208,10 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Get document info
+    // Verify document exists and belongs to user
     const { data: document, error: docError } = await supabase
       .from("documents")
-      .select("*")
+      .select("id, name")
       .eq("id", documentId)
       .eq("user_id", user.id)
       .single();
@@ -115,86 +223,29 @@ Deno.serve(async (req) => {
       );
     }
 
-    console.log("Processing document:", document.name, document.file_type);
-
-    // Download file from storage
-    const { data: fileData, error: downloadError } = await supabase.storage
-      .from("documents")
-      .download(document.storage_path);
-
-    if (downloadError || !fileData) {
-      console.error("Download error:", downloadError);
-      await supabase
-        .from("documents")
-        .update({ status: "error" })
-        .eq("id", documentId);
-      
-      return new Response(
-        JSON.stringify({ error: "Failed to download file" }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    // Start background processing using EdgeRuntime.waitUntil
+    // @ts-ignore - EdgeRuntime is available in Supabase Edge Functions
+    if (typeof EdgeRuntime !== "undefined" && EdgeRuntime.waitUntil) {
+      // @ts-ignore
+      EdgeRuntime.waitUntil(
+        processDocumentInBackground(supabaseUrl, supabaseKey, documentId, user.id)
       );
+    } else {
+      // Fallback: process without waiting (fire and forget)
+      processDocumentInBackground(supabaseUrl, supabaseKey, documentId, user.id);
     }
 
-    // Extract text from file
-    const fileBuffer = await fileData.arrayBuffer();
-    const text = await extractText(fileBuffer, document.file_type);
-    
-    console.log("Extracted text length:", text.length);
-
-    if (text.length === 0) {
-      await supabase
-        .from("documents")
-        .update({ status: "error", chunks_count: 0 })
-        .eq("id", documentId);
-      
-      return new Response(
-        JSON.stringify({ error: "Could not extract text from file" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    // Chunk the text
-    const chunks = chunkText(text, 1000, 200);
-    console.log("Created chunks:", chunks.length);
-
-    // Delete existing chunks for this document
-    await supabase
-      .from("document_chunks")
-      .delete()
-      .eq("document_id", documentId);
-
-    // Insert new chunks
-    const chunkRecords = chunks.map((content, index) => ({
-      document_id: documentId,
-      chunk_index: index,
-      content: content.trim(),
-    }));
-
-    // Insert in batches of 100
-    for (let i = 0; i < chunkRecords.length; i += 100) {
-      const batch = chunkRecords.slice(i, i + 100);
-      const { error: insertError } = await supabase
-        .from("document_chunks")
-        .insert(batch);
-      
-      if (insertError) {
-        console.error("Insert error:", insertError);
-      }
-    }
-
-    // Update document status
-    await supabase
-      .from("documents")
-      .update({ status: "processed", chunks_count: chunks.length })
-      .eq("id", documentId);
-
+    // Return immediately with accepted status
     return new Response(
       JSON.stringify({ 
         success: true, 
-        chunksCount: chunks.length,
-        textLength: text.length 
+        message: "Document processing started",
+        documentId: documentId
       }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      { 
+        status: 202, 
+        headers: { ...corsHeaders, "Content-Type": "application/json" } 
+      }
     );
 
   } catch (error: unknown) {
