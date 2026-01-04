@@ -5,18 +5,13 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-// Simple text chunking function
-function chunkText(text: string, chunkSize: number = 1000, overlap: number = 200): string[] {
+// Simple text chunking - minimal memory
+function chunkText(text: string): string[] {
+  const chunkSize = 5000;
   const chunks: string[] = [];
-  let start = 0;
-  
-  while (start < text.length) {
-    const end = Math.min(start + chunkSize, text.length);
-    chunks.push(text.slice(start, end));
-    start = end - overlap;
-    if (start >= text.length) break;
+  for (let i = 0; i < text.length && chunks.length < 10; i += chunkSize) {
+    chunks.push(text.slice(i, i + chunkSize));
   }
-  
   return chunks;
 }
 
@@ -120,12 +115,8 @@ async function processDocumentInBackground(
       return;
     }
 
-    // Chunk the text - limit to 50 chunks max to prevent memory issues  
-    let chunks = chunkText(text, 2000, 100);
-    if (chunks.length > 50) {
-      console.log("Limiting chunks from", chunks.length, "to 50");
-      chunks = chunks.slice(0, 50);
-    }
+    // Create minimal chunks - max 10 chunks of 5000 chars each
+    const chunks = chunkText(text);
     console.log("Created chunks:", chunks.length);
 
     // Delete existing chunks for this document
