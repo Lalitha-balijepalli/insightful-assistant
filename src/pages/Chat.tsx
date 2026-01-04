@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -8,7 +8,6 @@ import {
   Plus,
   FileText,
   Settings,
-  MessageSquare,
   Sparkles,
   Upload,
   Search,
@@ -19,6 +18,7 @@ import {
   Copy,
   RefreshCw,
   LogOut,
+  Trash2,
 } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
@@ -36,33 +36,175 @@ interface Message {
 interface Conversation {
   id: string;
   title: string;
-  lastMessage: string;
-  timestamp: Date;
+  updated_at: Date;
 }
 
 const Chat = () => {
   const { user, loading, signOut } = useAuth();
   const navigate = useNavigate();
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: "1",
-      role: "assistant",
-      content:
-        "Hello! I'm NexusAI, your intelligent assistant. I can help you with:\n\n• **Retrieving information** from your documents and knowledge base\n• **Automating tasks** like generating reports and sending notifications\n• **Answering questions** with accurate, sourced responses\n\nHow can I help you today?",
-      timestamp: new Date(),
-    },
-  ]);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const welcomeMessage: Message = {
+    id: "welcome",
+    role: "assistant",
+    content:
+      "Hello! I'm NexusAI, your intelligent assistant. I can help you with:\n\n• **Retrieving information** from your documents and knowledge base\n• **Automating tasks** like generating reports and sending notifications\n• **Answering questions** with accurate, sourced responses\n\nHow can I help you today?",
+    timestamp: new Date(),
+  };
+
+  // Load conversations
+  const loadConversations = useCallback(async () => {
+    if (!user) return;
+    
+    const { data, error } = await supabase
+      .from("conversations")
+      .select("id, title, updated_at")
+      .eq("user_id", user.id)
+      .order("updated_at", { ascending: false });
+
+    if (error) {
+      console.error("Error loading conversations:", error);
+      return;
+    }
+
+    setConversations(
+      data.map((c) => ({
+        id: c.id,
+        title: c.title,
+        updated_at: new Date(c.updated_at),
+      }))
+    );
+  }, [user]);
+
+  // Load messages for a conversation
+  const loadMessages = useCallback(async (conversationId: string) => {
+    const { data, error } = await supabase
+      .from("messages")
+      .select("id, role, content, created_at, sources")
+      .eq("conversation_id", conversationId)
+      .order("created_at", { ascending: true });
+
+    if (error) {
+      console.error("Error loading messages:", error);
+      return;
+    }
+
+    const loadedMessages: Message[] = data.map((m) => ({
+      id: m.id,
+      role: m.role as "user" | "assistant",
+      content: m.content,
+      timestamp: new Date(m.created_at),
+      sources: m.sources as string[] | undefined,
+    }));
+
+    setMessages(loadedMessages.length > 0 ? loadedMessages : [welcomeMessage]);
+  }, []);
+
+  // Create new conversation
+  const createConversation = async (): Promise<string | null> => {
+    if (!user) return null;
+
+    const { data, error } = await supabase
+      .from("conversations")
+      .insert({ user_id: user.id, title: "New Conversation" })
+      .select("id")
+      .single();
+
+    if (error) {
+      console.error("Error creating conversation:", error);
+      toast.error("Failed to create conversation");
+      return null;
+    }
+
+    await loadConversations();
+    return data.id;
+  };
+
+  // Save message to database
+  const saveMessage = async (
+    conversationId: string,
+    role: "user" | "assistant",
+    content: string,
+    sources?: string[]
+  ): Promise<string | null> => {
+    const { data, error } = await supabase
+      .from("messages")
+      .insert({
+        conversation_id: conversationId,
+        role,
+        content,
+        sources: sources || null,
+      })
+      .select("id")
+      .single();
+
+    if (error) {
+      console.error("Error saving message:", error);
+      return null;
+    }
+
+    return data.id;
+  };
+
+  // Update conversation title based on first message
+  const updateConversationTitle = async (conversationId: string, firstMessage: string) => {
+    const title = firstMessage.slice(0, 50) + (firstMessage.length > 50 ? "..." : "");
+    
+    await supabase
+      .from("conversations")
+      .update({ title, updated_at: new Date().toISOString() })
+      .eq("id", conversationId);
+
+    await loadConversations();
+  };
+
+  // Delete conversation
+  const deleteConversation = async (conversationId: string) => {
+    const { error } = await supabase
+      .from("conversations")
+      .delete()
+      .eq("id", conversationId);
+
+    if (error) {
+      console.error("Error deleting conversation:", error);
+      toast.error("Failed to delete conversation");
+      return;
+    }
+
+    if (currentConversationId === conversationId) {
+      setCurrentConversationId(null);
+      setMessages([welcomeMessage]);
+    }
+
+    await loadConversations();
+    toast.success("Conversation deleted");
+  };
 
   useEffect(() => {
     if (!loading && !user) {
       navigate("/login");
     }
   }, [user, loading, navigate]);
+
+  useEffect(() => {
+    if (user) {
+      loadConversations();
+    }
+  }, [user, loadConversations]);
+
+  // Initialize with welcome message when no conversation selected
+  useEffect(() => {
+    if (!currentConversationId && messages.length === 0) {
+      setMessages([welcomeMessage]);
+    }
+  }, [currentConversationId]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -72,16 +214,16 @@ const Chat = () => {
     scrollToBottom();
   }, [messages]);
 
-  const streamChat = async (userMessage: string) => {
+  const streamChat = async (userMessage: string, conversationId: string) => {
     setIsLoading(true);
     
-    const allMessages = [
-      ...messages.filter(m => m.id !== "1").map(m => ({
+    const allMessages = messages
+      .filter(m => m.id !== "welcome")
+      .map(m => ({
         role: m.role as "user" | "assistant",
         content: m.content,
-      })),
-      { role: "user" as const, content: userMessage },
-    ];
+      }));
+    allMessages.push({ role: "user", content: userMessage });
 
     try {
       const response = await fetch(
@@ -129,7 +271,6 @@ const Chat = () => {
 
         buffer += decoder.decode(value, { stream: true });
 
-        // Process complete lines
         let newlineIndex: number;
         while ((newlineIndex = buffer.indexOf("\n")) !== -1) {
           let line = buffer.slice(0, newlineIndex);
@@ -156,16 +297,34 @@ const Chat = () => {
               );
             }
           } catch {
-            // Incomplete JSON, put back and wait
             buffer = line + "\n" + buffer;
             break;
           }
         }
       }
+
+      // Save assistant message to database
+      if (assistantContent) {
+        const savedId = await saveMessage(conversationId, "assistant", assistantContent);
+        if (savedId) {
+          setMessages(prev =>
+            prev.map(m =>
+              m.id === assistantId ? { ...m, id: savedId } : m
+            )
+          );
+        }
+      }
+
+      // Update conversation timestamp
+      await supabase
+        .from("conversations")
+        .update({ updated_at: new Date().toISOString() })
+        .eq("id", conversationId);
+
+      await loadConversations();
     } catch (error) {
       console.error("Chat error:", error);
       toast.error(error instanceof Error ? error.message : "Failed to send message");
-      // Remove the loading message if there was an error
       setMessages(prev => prev.filter(m => m.content !== ""));
     } finally {
       setIsLoading(false);
@@ -175,6 +334,16 @@ const Chat = () => {
   const handleSend = async () => {
     if (!inputValue.trim() || isLoading) return;
 
+    let convId = currentConversationId;
+    const isFirstMessage = !convId || messages.filter(m => m.id !== "welcome").length === 0;
+
+    // Create conversation if needed
+    if (!convId) {
+      convId = await createConversation();
+      if (!convId) return;
+      setCurrentConversationId(convId);
+    }
+
     const userMessage: Message = {
       id: Date.now().toString(),
       role: "user",
@@ -182,11 +351,25 @@ const Chat = () => {
       timestamp: new Date(),
     };
 
-    setMessages(prev => [...prev, userMessage]);
+    // Remove welcome message and add user message
+    setMessages(prev => [...prev.filter(m => m.id !== "welcome"), userMessage]);
     const messageContent = inputValue;
     setInputValue("");
-    
-    await streamChat(messageContent);
+
+    // Save user message
+    const savedId = await saveMessage(convId, "user", messageContent);
+    if (savedId) {
+      setMessages(prev =>
+        prev.map(m => (m.id === userMessage.id ? { ...m, id: savedId } : m))
+      );
+    }
+
+    // Update title on first message
+    if (isFirstMessage) {
+      await updateConversationTitle(convId, messageContent);
+    }
+
+    await streamChat(messageContent, convId);
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -196,10 +379,24 @@ const Chat = () => {
     }
   };
 
+  const handleNewChat = () => {
+    setCurrentConversationId(null);
+    setMessages([welcomeMessage]);
+  };
+
+  const handleSelectConversation = async (conversation: Conversation) => {
+    setCurrentConversationId(conversation.id);
+    await loadMessages(conversation.id);
+  };
+
   const handleSignOut = async () => {
     await signOut();
     navigate("/");
   };
+
+  const filteredConversations = conversations.filter(c =>
+    c.title.toLowerCase().includes(searchQuery.toLowerCase())
+  );
 
   if (loading) {
     return (
@@ -225,14 +422,7 @@ const Chat = () => {
             </div>
             <span className="font-semibold">NexusAI</span>
           </Link>
-          <Button variant="outline" className="w-full justify-start gap-2" onClick={() => {
-            setMessages([{
-              id: "1",
-              role: "assistant",
-              content: "Hello! I'm NexusAI, your intelligent assistant. How can I help you today?",
-              timestamp: new Date(),
-            }]);
-          }}>
+          <Button variant="outline" className="w-full justify-start gap-2" onClick={handleNewChat}>
             <Plus className="w-4 h-4" />
             New Chat
           </Button>
@@ -244,6 +434,8 @@ const Chat = () => {
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
             <Input
               placeholder="Search conversations..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
               className="pl-9 bg-sidebar-accent border-sidebar-border"
             />
           </div>
@@ -252,10 +444,38 @@ const Chat = () => {
         {/* Conversation List */}
         <ScrollArea className="flex-1 px-2">
           <div className="space-y-1">
-            {conversations.length === 0 && (
+            {filteredConversations.length === 0 ? (
               <p className="text-sm text-muted-foreground text-center py-4">
                 No conversations yet
               </p>
+            ) : (
+              filteredConversations.map((conversation) => (
+                <div
+                  key={conversation.id}
+                  className={`group flex items-center gap-2 p-2 rounded-lg cursor-pointer hover:bg-sidebar-accent transition-colors ${
+                    currentConversationId === conversation.id ? "bg-sidebar-accent" : ""
+                  }`}
+                  onClick={() => handleSelectConversation(conversation)}
+                >
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium truncate">{conversation.title}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {conversation.updated_at.toLocaleDateString()}
+                    </p>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 opacity-0 group-hover:opacity-100 transition-opacity"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      deleteConversation(conversation.id);
+                    }}
+                  >
+                    <Trash2 className="w-3 h-3 text-destructive" />
+                  </Button>
+                </div>
+              ))
             )}
           </div>
         </ScrollArea>
@@ -374,7 +594,7 @@ const Chat = () => {
                       </div>
                     )}
                   </div>
-                  {message.role === "assistant" && message.content && (
+                  {message.role === "assistant" && message.content && message.id !== "welcome" && (
                     <div className="flex items-center gap-2 mt-2">
                       <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => {
                         navigator.clipboard.writeText(message.content);
