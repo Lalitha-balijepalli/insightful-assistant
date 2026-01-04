@@ -29,42 +29,32 @@ const AdminUsers = () => {
     try {
       setLoading(true);
       
-      // Fetch profiles
-      const { data: profiles, error: profilesError } = await supabase
-        .from("profiles")
-        .select("id, email, full_name, created_at");
+      // Use secure edge function that verifies admin role server-side
+      const { data: sessionData } = await supabase.auth.getSession();
+      if (!sessionData.session) {
+        toast.error("Not authenticated");
+        return;
+      }
 
-      if (profilesError) {
-        console.error("Error fetching profiles:", profilesError);
+      const response = await supabase.functions.invoke("admin-list-users", {
+        headers: {
+          Authorization: `Bearer ${sessionData.session.access_token}`,
+        },
+      });
+
+      if (response.error) {
+        console.error("Error fetching users:", response.error);
         toast.error("Failed to load users");
         return;
       }
 
-      // Fetch user roles
-      const { data: roles, error: rolesError } = await supabase
-        .from("user_roles")
-        .select("user_id, role");
-
-      if (rolesError) {
-        console.error("Error fetching roles:", rolesError);
+      if (response.data?.error) {
+        console.error("API error:", response.data.error);
+        toast.error(response.data.error);
+        return;
       }
 
-      // Create role map
-      const roleMap = new Map<string, string>();
-      roles?.forEach(r => {
-        roleMap.set(r.user_id, r.role);
-      });
-
-      // Combine profiles with roles
-      const usersWithRoles: UserProfile[] = (profiles || []).map(profile => ({
-        id: profile.id,
-        email: profile.email,
-        full_name: profile.full_name,
-        created_at: profile.created_at,
-        role: roleMap.get(profile.id) || "user",
-      }));
-
-      setUsers(usersWithRoles);
+      setUsers(response.data?.users || []);
     } catch (error) {
       console.error("Error:", error);
       toast.error("Failed to load users");
