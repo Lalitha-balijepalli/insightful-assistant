@@ -129,11 +129,11 @@ async function processDocumentInBackground(
       return;
     }
 
-    // Chunk the text - limit to 200 chunks max to prevent memory issues
-    let chunks = chunkText(text, 1000, 200);
-    if (chunks.length > 200) {
-      console.log("Limiting chunks from", chunks.length, "to 200");
-      chunks = chunks.slice(0, 200);
+    // Chunk the text - limit to 50 chunks max to prevent memory issues  
+    let chunks = chunkText(text, 2000, 100);
+    if (chunks.length > 50) {
+      console.log("Limiting chunks from", chunks.length, "to 50");
+      chunks = chunks.slice(0, 50);
     }
     console.log("Created chunks:", chunks.length);
 
@@ -143,33 +143,21 @@ async function processDocumentInBackground(
       .delete()
       .eq("document_id", documentId);
 
-    // Insert new chunks in a single batch (faster)
-    const chunkRecords = chunks.map((content, index) => ({
-      document_id: documentId,
-      chunk_index: index,
-      content: content.trim(),
-    }));
-
-    // Insert all at once if under 500 chunks, otherwise batch
-    if (chunkRecords.length <= 500) {
+    // Insert chunks in small batches to avoid memory issues
+    const BATCH_SIZE = 10;
+    for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
+      const batch = chunks.slice(i, i + BATCH_SIZE).map((content, idx) => ({
+        document_id: documentId,
+        chunk_index: i + idx,
+        content: content.trim(),
+      }));
+      
       const { error: insertError } = await supabase
         .from("document_chunks")
-        .insert(chunkRecords);
+        .insert(batch);
       
       if (insertError) {
-        console.error("Insert error:", insertError);
-      }
-    } else {
-      // Insert in larger batches of 500
-      for (let i = 0; i < chunkRecords.length; i += 500) {
-        const batch = chunkRecords.slice(i, i + 500);
-        const { error: insertError } = await supabase
-          .from("document_chunks")
-          .insert(batch);
-        
-        if (insertError) {
-          console.error("Insert error:", insertError);
-        }
+        console.error("Insert error at batch", i, ":", insertError);
       }
     }
 
