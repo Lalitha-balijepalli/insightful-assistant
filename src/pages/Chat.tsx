@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Badge } from "@/components/ui/badge";
 import {
   Bot,
   Send,
@@ -19,11 +20,17 @@ import {
   RefreshCw,
   LogOut,
   Trash2,
+  FileSearch,
+  Zap,
+  Lightbulb,
+  MessageSquare,
 } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
+
+type IntentType = "information_retrieval" | "task_automation" | "decision_support" | "general";
 
 interface Message {
   id: string;
@@ -32,6 +39,7 @@ interface Message {
   timestamp: Date;
   sources?: string[];
   feedback?: "positive" | "negative" | null;
+  intentType?: IntentType;
 }
 
 interface Conversation {
@@ -39,6 +47,30 @@ interface Conversation {
   title: string;
   updated_at: Date;
 }
+
+// Intent badge configuration
+const intentConfig: Record<IntentType, { label: string; icon: React.ElementType; className: string }> = {
+  information_retrieval: {
+    label: "Retrieval",
+    icon: FileSearch,
+    className: "bg-blue-500/20 text-blue-400 border-blue-500/30",
+  },
+  task_automation: {
+    label: "Automation",
+    icon: Zap,
+    className: "bg-amber-500/20 text-amber-400 border-amber-500/30",
+  },
+  decision_support: {
+    label: "Decision",
+    icon: Lightbulb,
+    className: "bg-purple-500/20 text-purple-400 border-purple-500/30",
+  },
+  general: {
+    label: "General",
+    icon: MessageSquare,
+    className: "bg-muted text-muted-foreground border-border",
+  },
+};
 
 const Chat = () => {
   const { user, loading, signOut } = useAuth();
@@ -274,12 +306,16 @@ const Chat = () => {
         throw new Error("No response body");
       }
 
+      // Capture intent from response headers
+      const intentType = response.headers.get("X-Intent-Type") as IntentType || "general";
+      console.log("Intent detected:", intentType);
+
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let assistantContent = "";
       const assistantId = Date.now().toString();
 
-      // Add empty assistant message
+      // Add empty assistant message with intent
       setMessages(prev => [
         ...prev,
         {
@@ -287,6 +323,7 @@ const Chat = () => {
           role: "assistant",
           content: "",
           timestamp: new Date(),
+          intentType,
         },
       ]);
 
@@ -591,6 +628,24 @@ const Chat = () => {
                     message.role === "user" ? "text-right" : ""
                   }`}
                 >
+                  {/* Intent Badge for assistant messages */}
+                  {message.role === "assistant" && message.intentType && message.id !== "welcome" && (
+                    <div className="mb-2">
+                      {(() => {
+                        const config = intentConfig[message.intentType];
+                        const IconComponent = config.icon;
+                        return (
+                          <Badge 
+                            variant="outline" 
+                            className={`text-xs gap-1 ${config.className}`}
+                          >
+                            <IconComponent className="w-3 h-3" />
+                            {config.label}
+                          </Badge>
+                        );
+                      })()}
+                    </div>
+                  )}
                   <div
                     className={`inline-block p-4 rounded-2xl max-w-full ${
                       message.role === "user"
