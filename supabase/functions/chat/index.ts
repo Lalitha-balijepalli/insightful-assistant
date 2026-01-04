@@ -246,8 +246,71 @@ serve(async (req) => {
 
     console.log("Processing chat request with", messages.length, "messages for user:", userId);
 
+    // Create Supabase client for database operations
+    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
     // Get the latest user message
     const latestUserMessage = messages.filter(m => m.role === "user").pop();
+
+    // Load conversation memory: recent messages from past conversations
+    let conversationMemory = "";
+    try {
+      // Get the 3 most recent conversations (excluding current one if identified)
+      const { data: recentConversations, error: convError } = await supabase
+        .from("conversations")
+        .select("id, title, updated_at")
+        .eq("user_id", userId)
+        .order("updated_at", { ascending: false })
+        .limit(4);
+
+      if (!convError && recentConversations && recentConversations.length > 0) {
+        const conversationIds = recentConversations.map(c => c.id);
+        
+        // Get the last few messages from each recent conversation
+        const { data: recentMessages, error: msgError } = await supabase
+          .from("messages")
+          .select("conversation_id, role, content, created_at")
+          .in("conversation_id", conversationIds)
+          .order("created_at", { ascending: false })
+          .limit(20);
+
+        if (!msgError && recentMessages && recentMessages.length > 0) {
+          // Group messages by conversation and create summaries
+          const conversationMap = new Map<string, { title: string; messages: Array<{ role: string; content: string }> }>();
+          
+          for (const conv of recentConversations) {
+            conversationMap.set(conv.id, { title: conv.title, messages: [] });
+          }
+          
+          for (const msg of recentMessages) {
+            const conv = conversationMap.get(msg.conversation_id);
+            if (conv && conv.messages.length < 4) {
+              conv.messages.push({ role: msg.role, content: msg.content.substring(0, 200) });
+            }
+          }
+
+          // Build memory context
+          const memoryParts: string[] = [];
+          for (const [_, conv] of conversationMap) {
+            if (conv.messages.length > 0) {
+              const summary = conv.messages
+                .reverse()
+                .map(m => `${m.role}: ${m.content}${m.content.length >= 200 ? '...' : ''}`)
+                .join('\n');
+              memoryParts.push(`### ${conv.title}\n${summary}`);
+            }
+          }
+
+          if (memoryParts.length > 0) {
+            conversationMemory = `\n\n## Recent Conversation History:\nHere are summaries of recent conversations with this user:\n\n${memoryParts.slice(0, 3).join('\n\n')}`;
+            console.log(`Loaded memory from ${memoryParts.length} recent conversations`);
+          }
+        }
+      }
+    } catch (memoryError) {
+      console.error("Error loading conversation memory:", memoryError);
+      // Continue without memory - non-fatal
+    }
     
     // Classify intent for the latest message
     let classifiedIntent: ClassifiedIntent = { type: "general", confidence: 0.5, description: "" };
@@ -260,7 +323,6 @@ serve(async (req) => {
     let ragContext = "";
 
     if (userId && latestUserMessage) {
-      const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
       
       const { data: documents, error: docError } = await supabase
         .from("documents")
@@ -368,6 +430,16 @@ GROUNDING & CITATION RULES
 • If uncertain, ask clarifying questions
 • Always cite which document and section information came from
 • If the context doesn't contain relevant information, say so honestly
+
+═══════════════════════════════════════════════════════════
+CONVERSATION MEMORY
+═══════════════════════════════════════════════════════════
+You have access to the user's recent conversation history. Use this to:
+• Reference previous discussions when relevant
+• Maintain continuity across conversations
+• Recall user preferences and past requests
+• Avoid asking for information already shared
+${conversationMemory}
 ${ragContext}
 
 ═══════════════════════════════════════════════════════════
