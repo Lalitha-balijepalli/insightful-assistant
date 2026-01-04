@@ -20,40 +20,57 @@ function chunkText(text: string, chunkSize: number = 1000, overlap: number = 200
   return chunks;
 }
 
-// Extract text from different file types
+// Maximum text size to prevent memory issues (500KB)
+const MAX_TEXT_SIZE = 500000;
+
+// Extract text from different file types with size limits
 function extractText(fileBuffer: ArrayBuffer, fileType: string): string {
   const decoder = new TextDecoder("utf-8");
   
   // For TXT and CSV files, just decode the text
   if (fileType === "text/plain" || fileType === "text/csv" || fileType.includes("csv")) {
-    return decoder.decode(fileBuffer);
+    const text = decoder.decode(fileBuffer);
+    return text.slice(0, MAX_TEXT_SIZE);
   }
   
-  // For PDF files, extract basic text
+  // For PDF files, extract basic text with memory-efficient approach
   if (fileType === "application/pdf") {
-    const text = decoder.decode(fileBuffer);
+    // Only process first 2MB of PDF to avoid memory issues
+    const maxPdfSize = 2 * 1024 * 1024;
+    const limitedBuffer = fileBuffer.byteLength > maxPdfSize 
+      ? fileBuffer.slice(0, maxPdfSize) 
+      : fileBuffer;
+    
+    const text = decoder.decode(limitedBuffer);
     const textParts: string[] = [];
+    let totalLength = 0;
+    
+    // Extract text streams from PDF
     const streamRegex = /stream[\r\n]+([\s\S]*?)[\r\n]+endstream/g;
     let match;
-    while ((match = streamRegex.exec(text)) !== null) {
+    while ((match = streamRegex.exec(text)) !== null && totalLength < MAX_TEXT_SIZE) {
       const streamContent = match[1];
       const readable = streamContent.replace(/[^\x20-\x7E\r\n]/g, " ").trim();
-      if (readable.length > 10) {
+      if (readable.length > 20 && readable.length < 50000) {
         textParts.push(readable);
+        totalLength += readable.length;
       }
     }
     
     if (textParts.length === 0) {
+      // Fallback: extract any readable text
       const readable = text.replace(/[^\x20-\x7E\r\n]/g, " ").replace(/\s+/g, " ").trim();
-      return readable.slice(0, 50000);
+      return readable.slice(0, MAX_TEXT_SIZE);
     }
     
-    return textParts.join("\n\n");
+    const result = textParts.join("\n\n");
+    return result.slice(0, MAX_TEXT_SIZE);
   }
   
   // For other types, try to decode as text
   try {
-    return decoder.decode(fileBuffer);
+    const text = decoder.decode(fileBuffer);
+    return text.slice(0, MAX_TEXT_SIZE);
   } catch {
     return "";
   }
@@ -112,8 +129,12 @@ async function processDocumentInBackground(
       return;
     }
 
-    // Chunk the text
-    const chunks = chunkText(text, 1000, 200);
+    // Chunk the text - limit to 200 chunks max to prevent memory issues
+    let chunks = chunkText(text, 1000, 200);
+    if (chunks.length > 200) {
+      console.log("Limiting chunks from", chunks.length, "to 200");
+      chunks = chunks.slice(0, 200);
+    }
     console.log("Created chunks:", chunks.length);
 
     // Delete existing chunks for this document
