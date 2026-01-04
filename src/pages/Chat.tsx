@@ -31,6 +31,7 @@ interface Message {
   content: string;
   timestamp: Date;
   sources?: string[];
+  feedback?: "positive" | "negative" | null;
 }
 
 interface Conversation {
@@ -87,7 +88,7 @@ const Chat = () => {
   const loadMessages = useCallback(async (conversationId: string) => {
     const { data, error } = await supabase
       .from("messages")
-      .select("id, role, content, created_at, sources")
+      .select("id, role, content, created_at, sources, feedback")
       .eq("conversation_id", conversationId)
       .order("created_at", { ascending: true });
 
@@ -102,10 +103,30 @@ const Chat = () => {
       content: m.content,
       timestamp: new Date(m.created_at),
       sources: m.sources as string[] | undefined,
+      feedback: m.feedback as "positive" | "negative" | null,
     }));
 
     setMessages(loadedMessages.length > 0 ? loadedMessages : [welcomeMessage]);
   }, []);
+
+  // Save feedback for a message
+  const saveFeedback = async (messageId: string, feedback: "positive" | "negative") => {
+    const { error } = await supabase
+      .from("messages")
+      .update({ feedback })
+      .eq("id", messageId);
+
+    if (error) {
+      console.error("Error saving feedback:", error);
+      toast.error("Failed to save feedback");
+      return;
+    }
+
+    setMessages(prev =>
+      prev.map(m => (m.id === messageId ? { ...m, feedback } : m))
+    );
+    toast.success("Feedback saved");
+  };
 
   // Create new conversation
   const createConversation = async (): Promise<string | null> => {
@@ -602,10 +623,20 @@ const Chat = () => {
                       }}>
                         <Copy className="w-3 h-3" />
                       </Button>
-                      <Button variant="ghost" size="sm" className="h-7 px-2">
+                      <Button 
+                        variant="ghost" 
+                        size="sm" 
+                        className={`h-7 px-2 ${message.feedback === "positive" ? "text-green-500" : ""}`}
+                        onClick={() => saveFeedback(message.id, "positive")}
+                      >
                         <ThumbsUp className="w-3 h-3" />
                       </Button>
-                      <Button variant="ghost" size="sm" className="h-7 px-2">
+                      <Button 
+                        variant="ghost" 
+                        size="sm" 
+                        className={`h-7 px-2 ${message.feedback === "negative" ? "text-destructive" : ""}`}
+                        onClick={() => saveFeedback(message.id, "negative")}
+                      >
                         <ThumbsDown className="w-3 h-3" />
                       </Button>
                       <Button variant="ghost" size="sm" className="h-7 px-2">
