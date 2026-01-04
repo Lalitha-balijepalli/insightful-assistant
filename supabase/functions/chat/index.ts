@@ -28,8 +28,6 @@ serve(async (req) => {
   }
 
   try {
-    const { messages } = (await req.json()) as ChatRequest;
-    
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
     const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
@@ -44,22 +42,75 @@ serve(async (req) => {
       throw new Error("Database service is not configured");
     }
 
-    // Get user from authorization header
+    // Enforce authentication - require valid auth header
     const authHeader = req.headers.get("authorization");
-    let userId: string | null = null;
+    if (!authHeader) {
+      console.error("Missing authorization header");
+      return new Response(
+        JSON.stringify({ error: "Authentication required" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
 
-    if (authHeader) {
-      const supabaseClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-      const token = authHeader.replace("Bearer ", "");
-      
-      // Verify the user's token
-      const { data: { user }, error: authError } = await supabaseClient.auth.getUser(token);
-      if (!authError && user) {
-        userId = user.id;
+    const supabaseClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+    const token = authHeader.replace("Bearer ", "");
+    
+    // Verify the user's token
+    const { data: { user }, error: authError } = await supabaseClient.auth.getUser(token);
+    if (authError || !user) {
+      console.error("Invalid or expired token:", authError?.message);
+      return new Response(
+        JSON.stringify({ error: "Invalid or expired token" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const userId = user.id;
+
+    // Parse and validate request body
+    const body = await req.json();
+    const { messages } = body;
+
+    // Validate messages array exists and is non-empty
+    if (!Array.isArray(messages) || messages.length === 0) {
+      console.error("Invalid messages format");
+      return new Response(
+        JSON.stringify({ error: "Invalid messages format: expected non-empty array" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Limit message count to prevent abuse
+    const MAX_MESSAGES = 50;
+    if (messages.length > MAX_MESSAGES) {
+      console.error(`Too many messages: ${messages.length}`);
+      return new Response(
+        JSON.stringify({ error: `Too many messages (max ${MAX_MESSAGES})` }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Validate each message structure and content size
+    const MAX_CONTENT_LENGTH = 10000; // 10KB per message
+    const validRoles = ["user", "assistant", "system"];
+    for (const msg of messages) {
+      if (!msg.role || !validRoles.includes(msg.role)) {
+        console.error("Invalid message role:", msg.role);
+        return new Response(
+          JSON.stringify({ error: "Invalid message role" }),
+          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      if (typeof msg.content !== "string" || msg.content.length > MAX_CONTENT_LENGTH) {
+        console.error("Invalid or oversized message content");
+        return new Response(
+          JSON.stringify({ error: `Invalid or oversized message content (max ${MAX_CONTENT_LENGTH} characters)` }),
+          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
       }
     }
 
-    console.log("Processing chat request with", messages.length, "messages");
+    console.log("Processing chat request with", messages.length, "messages for user:", userId);
 
     // Extract the latest user message for RAG search
     const latestUserMessage = messages.filter(m => m.role === "user").pop();
@@ -82,10 +133,10 @@ serve(async (req) => {
 
         // Search for relevant chunks using simple text matching
         // In production, you'd use vector embeddings for semantic search
-        const searchTerms = latestUserMessage.content
+        const searchTerms: string[] = latestUserMessage.content
           .toLowerCase()
           .split(/\s+/)
-          .filter(term => term.length > 3);
+          .filter((term: string) => term.length > 3);
 
         if (searchTerms.length > 0) {
           // Get all chunks from user's documents
@@ -99,7 +150,7 @@ serve(async (req) => {
             // Score chunks by keyword matches
             const scoredChunks = chunks.map(chunk => {
               const contentLower = chunk.content.toLowerCase();
-              const score = searchTerms.reduce((acc, term) => {
+              const score = searchTerms.reduce((acc: number, term: string) => {
                 return acc + (contentLower.includes(term) ? 1 : 0);
               }, 0);
               return {
