@@ -11,15 +11,153 @@ interface ChatMessage {
   content: string;
 }
 
-interface ChatRequest {
-  messages: ChatMessage[];
-  conversationId?: string;
-}
-
 interface DocumentChunk {
   content: string;
   document_name: string;
   chunk_index: number;
+}
+
+type IntentType = "information_retrieval" | "task_automation" | "decision_support" | "general";
+
+interface ClassifiedIntent {
+  type: IntentType;
+  confidence: number;
+  description: string;
+  suggestedAction?: string;
+}
+
+// Classify user intent using AI
+async function classifyIntent(
+  userMessage: string,
+  apiKey: string
+): Promise<ClassifiedIntent> {
+  console.log("Classifying intent for message:", userMessage.substring(0, 100));
+
+  const classificationPrompt = `Analyze the following user message and classify it into ONE of these categories:
+
+1. INFORMATION_RETRIEVAL - User wants to find, search, or retrieve information from documents/data
+   Examples: "What does the document say about...", "Find information on...", "Summarize the PDF"
+
+2. TASK_AUTOMATION - User wants to perform an action or automate a task
+   Examples: "Create a report", "Send a notification", "Schedule a reminder", "Generate an export"
+
+3. DECISION_SUPPORT - User wants analysis, recommendations, or help making a decision
+   Examples: "Should I...", "Compare these options", "What's the best approach", "Analyze trends"
+
+4. GENERAL - General conversation, greetings, or unclear intent
+
+User message: "${userMessage}"
+
+Respond ONLY with valid JSON in this exact format:
+{
+  "type": "information_retrieval" | "task_automation" | "decision_support" | "general",
+  "confidence": 0.0 to 1.0,
+  "description": "brief description of what the user wants",
+  "suggestedAction": "optional: specific action to take"
+}`;
+
+  try {
+    const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "google/gemini-2.5-flash",
+        messages: [
+          { role: "system", content: "You are an intent classifier. Respond only with valid JSON." },
+          { role: "user", content: classificationPrompt },
+        ],
+        stream: false,
+      }),
+    });
+
+    if (!response.ok) {
+      console.error("Intent classification failed:", response.status);
+      return { type: "general", confidence: 0.5, description: "Could not classify intent" };
+    }
+
+    const data = await response.json();
+    const content = data.choices?.[0]?.message?.content || "";
+    
+    // Parse JSON from response (handle markdown code blocks)
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+      console.log("Classified intent:", parsed.type, "confidence:", parsed.confidence);
+      return {
+        type: parsed.type || "general",
+        confidence: parsed.confidence || 0.5,
+        description: parsed.description || "",
+        suggestedAction: parsed.suggestedAction,
+      };
+    }
+  } catch (error) {
+    console.error("Error classifying intent:", error);
+  }
+
+  return { type: "general", confidence: 0.5, description: "Default classification" };
+}
+
+// Get intent-specific system prompt additions
+function getIntentPromptAddition(intent: ClassifiedIntent): string {
+  switch (intent.type) {
+    case "information_retrieval":
+      return `
+═══════════════════════════════════════════════════════════
+INTENT DETECTED: INFORMATION RETRIEVAL
+═══════════════════════════════════════════════════════════
+The user is looking for specific information. You MUST:
+• Search the provided document context thoroughly
+• Cite exact sources and section numbers
+• If information is not found, clearly state: "This information was not found in the uploaded documents."
+• Provide direct, factual answers without speculation
+• Quote relevant passages when helpful
+`;
+
+    case "task_automation":
+      return `
+═══════════════════════════════════════════════════════════
+INTENT DETECTED: TASK AUTOMATION
+═══════════════════════════════════════════════════════════
+The user wants to perform an action. You MUST:
+• Acknowledge the requested task clearly
+• Describe the steps you would take to complete it
+• If the task involves document data, extract the relevant information first
+• Confirm what action would be performed and its expected outcome
+• If the task cannot be automated, explain what manual steps are needed
+
+Supported automation tasks:
+• Generate reports from document data
+• Create summaries and exports
+• Extract and format specific data
+• Identify patterns and anomalies
+• Set up monitoring alerts (describe what would be monitored)
+`;
+
+    case "decision_support":
+      return `
+═══════════════════════════════════════════════════════════
+INTENT DETECTED: DECISION SUPPORT
+═══════════════════════════════════════════════════════════
+The user needs analysis or recommendations. You MUST:
+• Analyze the available data objectively
+• Present multiple perspectives or options when applicable
+• Provide evidence-based recommendations
+• Highlight key factors affecting the decision
+• Acknowledge uncertainties and limitations
+• Structure your response with clear pros/cons or criteria
+
+Use frameworks like:
+• Comparison tables for multiple options
+• Risk/benefit analysis
+• Priority ranking with reasoning
+`;
+
+    default:
+      return "";
+  }
 }
 
 serve(async (req) => {
@@ -42,7 +180,7 @@ serve(async (req) => {
       throw new Error("Database service is not configured");
     }
 
-    // Enforce authentication - require valid auth header
+    // Enforce authentication
     const authHeader = req.headers.get("authorization");
     if (!authHeader) {
       console.error("Missing authorization header");
@@ -55,7 +193,6 @@ serve(async (req) => {
     const supabaseClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
     const token = authHeader.replace("Bearer ", "");
     
-    // Verify the user's token
     const { data: { user }, error: authError } = await supabaseClient.auth.getUser(token);
     if (authError || !user) {
       console.error("Invalid or expired token:", authError?.message);
@@ -71,7 +208,6 @@ serve(async (req) => {
     const body = await req.json();
     const { messages } = body;
 
-    // Validate messages array exists and is non-empty
     if (!Array.isArray(messages) || messages.length === 0) {
       console.error("Invalid messages format");
       return new Response(
@@ -80,7 +216,6 @@ serve(async (req) => {
       );
     }
 
-    // Limit message count to prevent abuse
     const MAX_MESSAGES = 50;
     if (messages.length > MAX_MESSAGES) {
       console.error(`Too many messages: ${messages.length}`);
@@ -90,8 +225,7 @@ serve(async (req) => {
       );
     }
 
-    // Validate each message structure and content size
-    const MAX_CONTENT_LENGTH = 10000; // 10KB per message
+    const MAX_CONTENT_LENGTH = 10000;
     const validRoles = ["user", "assistant", "system"];
     for (const msg of messages) {
       if (!msg.role || !validRoles.includes(msg.role)) {
@@ -112,15 +246,22 @@ serve(async (req) => {
 
     console.log("Processing chat request with", messages.length, "messages for user:", userId);
 
-    // Extract the latest user message for RAG search
+    // Get the latest user message
     const latestUserMessage = messages.filter(m => m.role === "user").pop();
+    
+    // Classify intent for the latest message
+    let classifiedIntent: ClassifiedIntent = { type: "general", confidence: 0.5, description: "" };
+    if (latestUserMessage) {
+      classifiedIntent = await classifyIntent(latestUserMessage.content, LOVABLE_API_KEY);
+    }
+
+    // RAG: Search for relevant document context
     let contextChunks: DocumentChunk[] = [];
     let ragContext = "";
 
     if (userId && latestUserMessage) {
       const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
       
-      // Get user's processed documents
       const { data: documents, error: docError } = await supabase
         .from("documents")
         .select("id, name")
@@ -131,15 +272,12 @@ serve(async (req) => {
         const documentIds = documents.map(d => d.id);
         const documentMap = new Map(documents.map(d => [d.id, d.name]));
 
-        // Search for relevant chunks using simple text matching
-        // In production, you'd use vector embeddings for semantic search
         const searchTerms: string[] = latestUserMessage.content
           .toLowerCase()
           .split(/\s+/)
           .filter((term: string) => term.length > 3);
 
         if (searchTerms.length > 0) {
-          // Get all chunks from user's documents
           const { data: chunks, error: chunkError } = await supabase
             .from("document_chunks")
             .select("content, document_id, chunk_index")
@@ -147,7 +285,6 @@ serve(async (req) => {
             .limit(100);
 
           if (!chunkError && chunks) {
-            // Score chunks by keyword matches
             const scoredChunks = chunks.map(chunk => {
               const contentLower = chunk.content.toLowerCase();
               const score = searchTerms.reduce((acc: number, term: string) => {
@@ -160,7 +297,6 @@ serve(async (req) => {
               };
             });
 
-            // Get top 5 relevant chunks
             contextChunks = scoredChunks
               .filter(c => c.score > 0)
               .sort((a, b) => b.score - a.score)
@@ -183,13 +319,16 @@ serve(async (req) => {
       }
     }
 
+    // Build the system prompt with intent-specific additions
+    const intentPromptAddition = getIntentPromptAddition(classifiedIntent);
+
     const systemPrompt = `You are NexusAI, an AI-powered, document-aware enterprise assistant built using Retrieval-Augmented Generation (RAG).
 
 ═══════════════════════════════════════════════════════════
 CORE IDENTITY
 ═══════════════════════════════════════════════════════════
 You are NOT a chat-only bot. You are a production-ready RAG-based AI assistant that understands documents, analyzes data, and automates tasks.
-
+${intentPromptAddition}
 ═══════════════════════════════════════════════════════════
 DOCUMENT CAPABILITIES (MANDATORY)
 ═══════════════════════════════════════════════════════════
@@ -211,37 +350,6 @@ For EVERY user question:
 2. Retrieve the most relevant sections
 3. Use ONLY retrieved content to generate answers
 4. If no relevant content exists, clearly say: "The uploaded document does not contain this information."
-
-═══════════════════════════════════════════════════════════
-SUPPORTED USER ACTIONS
-═══════════════════════════════════════════════════════════
-Users can ask you to:
-• Summarize the uploaded document
-• Explain a specific section or page
-• Answer "What does the PDF say about this topic?"
-• Analyze Excel / CSV data
-• Generate insights or reports from the document
-
-═══════════════════════════════════════════════════════════
-TABULAR DATA HANDLING
-═══════════════════════════════════════════════════════════
-When working with Excel or CSV files:
-• Understand rows, columns, and headers
-• Perform analysis, comparisons, and summaries
-• Identify trends, totals, and anomalies
-
-═══════════════════════════════════════════════════════════
-TASK AUTOMATION FROM DOCUMENTS
-═══════════════════════════════════════════════════════════
-If the user requests actions such as:
-• "Create a report from this file"
-• "Send a summary via email"
-• "Set alerts based on document data"
-
-Then:
-• Extract insights from the uploaded documents
-• Describe the task execution and what would happen
-• Confirm successful completion
 
 ═══════════════════════════════════════════════════════════
 RESPONSE QUALITY RULES
@@ -302,15 +410,16 @@ You are a production-ready RAG-based AI assistant that understands documents, an
       throw new Error(`AI service error: ${response.status}`);
     }
 
-    console.log("Streaming response from AI gateway");
+    console.log("Streaming response from AI gateway, intent:", classifiedIntent.type);
 
-    // Build response headers
+    // Build response headers with intent and sources
     const responseHeaders: Record<string, string> = {
       ...corsHeaders,
       "Content-Type": "text/event-stream",
+      "X-Intent-Type": classifiedIntent.type,
+      "X-Intent-Confidence": String(classifiedIntent.confidence),
     };
 
-    // Add sources to response headers if we have them
     if (contextChunks.length > 0) {
       responseHeaders["X-RAG-Sources"] = JSON.stringify(contextChunks.map(c => c.document_name));
     }
